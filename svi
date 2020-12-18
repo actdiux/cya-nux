@@ -1,0 +1,967 @@
+#!/usr/bin/perl
+#####################################################################
+# VERSION= Tue Nov  1 15:32:13 EDT 2011
+# added system call touch 
+# ... add orig
+#####################################################################
+use 5.000;
+use strict;
+use warnings;
+
+use   Getopt::Std;
+use File::Copy;
+use File::Compare;
+use File::Basename;
+use File::Path;
+#This module has a useful function called mkpath. With mkpath you can create more than one level of directory at a time. In some cases, this could reduce a recursive function or a loop construct to a simple function call.
+use File::Spec::Unix;
+#use File::Spec::Unix;
+#use Unix;
+
+use Cwd;
+
+our $VERSION = 'Jun2008withnotes';
+
+use vars qw (
+		$DEBUG
+		$BACKUPONLY
+		$ORIG
+		$LISTONLY
+		$RECOVERWHICH
+		$QUES
+		$CLEANUP
+		$BACKUPDRIVE
+		$BACKUPDIR
+		$BACKEXT
+		$BACKLOCK_SUF
+		$DOC_SUF
+		$orig_from_file
+		$orig_to_file
+		$orig_edit_file
+		$EDITPROG
+		$KEEP_HIST
+		$KEEP_TIME
+		$good
+		$bad
+		$DUPDIR
+		$FROMTO
+		$YES
+		$NO
+	);
+
+$YES=1;
+$NO=0;
+
+$FROMTO=$NO;
+$BACKUPONLY=$NO;
+$ORIG=$NO;
+$LISTONLY=$NO;
+$RECOVERWHICH=$NO;
+$QUES=$YES;
+$DEBUG=$NO;
+$CLEANUP=$YES;
+
+#$EDITPROG="gvim.exe";
+$EDITPROG="\/bin\/vi";
+
+$BACKUPDRIVE="x:";
+$BACKUPDIR="\/usr\/local\/sviarch";
+$DUPDIR="\/tmp";
+$BACKLOCK_SUF=".inedit";
+$DOC_SUF=".doctxt";
+$BACKEXT=".inedit";
+
+# this is how many to keep
+$KEEP_HIST=25;
+# this is how old a file must be in days before we consider deleting it
+$KEEP_TIME=14; 
+$good=1;
+$bad=0;
+
+#############################################
+# life is simpler if I control the globbing
+#############################################
+sub myglob
+{
+	my ($indir,$patt)= (@_);
+	my @files;
+	my ($timet,$rr);
+	my @file;
+        my @files_srt_list;
+
+	$indir =~ s/\/\//\//g;
+	
+	opendir(DIR, $indir);
+	@files = grep(/$patt/, readdir(DIR));
+	closedir DIR;
+
+	for (@files) {$_ = $indir.$_};
+
+    	# we want to sort on the -M (modification time/inode change) value
+        # of test days since script ran
+        sub sort_by_file_M {  (-M $a ) <=>  (-C $b ) } ;
+
+        # take everything we have and sort them by -M time
+        @files_srt_list = sort sort_by_file_M @files;
+
+#        if ( $DEBUG )
+# this is showing anyway
+#        {
+#                foreach ($rr=0; $rr <= $#files_srt_list; $rr++ )
+#                {
+#                        $timet= (-M "$files_srt_list[$rr]");
+#                        print "....$rr:".$files_srt_list[$rr]."( $timet)\n";
+#                }
+#        }
+
+
+        return( @files_srt_list );
+}
+sub myglob_b
+{
+	my ($indir,$patt)= (@_);
+	my @files;
+	my ($timet,$rr);
+	my @file;
+        my @files_srt_list;
+
+	$indir =~ s/\/\//\//g;
+	
+	opendir(DIR, $indir);
+	@files = grep(/$patt/ && !/$DOC_SUF/, readdir(DIR));
+		
+	closedir DIR;
+
+	for (@files) {$_ = $indir.$_};
+
+    	# we want to sort on the -M (modification time/inode change) value
+        # of test days since script ran
+        sub sort_by_file_X {  (-M $a ) <=>  (-C $b ) } ;
+
+        # take everything we have and sort them by -M time
+        @files_srt_list = sort sort_by_file_X @files;
+
+#        if ( $DEBUG )
+# this is showing anyway
+#        {
+#                foreach ($rr=0; $rr <= $#files_srt_list; $rr++ )
+#                {
+#                        $timet= (-M "$files_srt_list[$rr]");
+#                        print "....$rr:".$files_srt_list[$rr]."( $timet)\n";
+#                }
+#        }
+
+
+        return( @files_srt_list );
+}
+#########################################
+# make the pathname full
+#########################################
+sub validate_path_file
+{
+	my ( $infl) = ( @_);
+	my ($ffvol,$ffpath,$ffile);
+	my $retval=$good;
+
+	if ( $infl =~ /^\.\./  )
+	{
+		$infl = relative_dir ( $infl );
+	}
+	elsif ( $infl =~ /^\//  )
+	{
+		#print "$infl is full pathname \n";
+		$retval=$good;
+			
+	}
+	else 
+	{
+		$infl = add_path ($infl);
+	}
+	if ( ! -f $infl )
+	{
+		($ffvol,$ffpath,$ffile)=File::Spec::Unix->splitpath($infl);
+		if ( -w $ffpath )
+		{
+			print "Warn ($infl) not a file";
+			print " - but I can write here($ffpath)\n";
+		}	
+		else
+		{
+			print "Error ($infl) not a file\n";
+			$retval=$bad;
+
+		}
+	}
+	return ( $retval,$infl);
+
+}
+##############################################################
+# take the pwd or cwd and add it onto the filename so we can work with fullpathnames
+##############################################################
+sub add_path
+{
+	my ( $infile) = ( @_);
+	my ($vol,$ppath,$outfile);
+
+	$ppath=cwd;
+	$outfile=File::Spec::Unix->catpath($vol,$ppath,$infile);
+
+	if ( $DEBUG)
+	{
+		print  "added fullpath ($ppath)($infile)-------$outfile\n";
+
+	}
+	return ($outfile);
+}
+############################################################
+# follow the realtive path and 
+# take the pwd or cwd and add it onto the filename so we can work with fullpathnames
+#############################################################
+sub relative_dir
+{
+	my ( $infilefull) = ( @_);
+	my ($keepcwd);
+
+	my ($outfile,$temp_dir,$vol,$topath,$edit_file);
+
+	# if this is a relative path
+	($vol,$topath,$edit_file)=File::Spec::Unix->splitpath($infilefull);
+
+	$keepcwd = getcwd();
+
+	chdir($topath);
+	$temp_dir=getcwd();
+	chdir($keepcwd);
+
+	$outfile=File::Spec::Unix->catpath($vol,$temp_dir,$edit_file);
+
+	if ( $DEBUG )
+	{
+		print("relative=>$infilefull now=> $outfile\n");
+	}
+	return($outfile);
+
+}
+############################################################
+# cleanup backup based on number and age
+############################################################
+sub cleanup_old_backups
+{
+	my ($quest,@listit)= ( @_);
+	my ($cnt,$ans,$sum, $cleancnt, $rr, $timet,@files_srt_list );
+	my (@cleanthis);
+	# to kill warning
+	$ans="";
+
+# moved this into myglob Wed Jan  5 11:48:51 EST 2005
+#	# we want to sort on the -C (create time/inode change) value
+#        # of test days since script ran
+#	sub sort_by_file_M {  (-C $a ) <=>  (-C $b ) } ;
+#
+#	# take everything we have and sort them by -C time
+#	@files_srt_list = sort sort_by_file_M @listit;
+	@files_srt_list = @listit;
+
+	if ( $DEBUG )
+	{
+		foreach ($rr=0; $rr <= $#files_srt_list; $rr++ )
+		{
+			$timet= (-M "$files_srt_list[$rr]");
+			print "$rr:".$files_srt_list[$rr]."( $timet)\n";
+		}
+	}
+	$cnt = $#files_srt_list+1;
+	$sum = $cnt - $KEEP_HIST ;
+
+	# if we have more then we want
+	if ( $sum > 0 )
+	{
+		$cleancnt=0;
+
+		# take the top off the list
+		foreach ($rr= $KEEP_HIST; $rr <= $#files_srt_list; $rr++ )
+		{
+			# how long since modification
+			$timet= (-M $files_srt_list[$rr]);
+
+
+			if ( $timet > $KEEP_TIME )
+			{
+				$cleancnt++;
+				push (@cleanthis,$files_srt_list[$rr] );
+
+				# only talk if not told to shutup (or we're debugging)
+				if ( $DEBUG  || $quest == $YES )
+				{
+					print "($rr):$files_srt_list[$rr] $timet days old\n";
+				}
+			}
+		}
+		# if we have stuff to clean - and we are asking permission
+		if ( $cleancnt > 0 && $quest == $YES )
+		{
+			print "set to keep $KEEP_HIST out of total of $cnt\n";
+			print "Want to clean up $sum file(s)? [y]/n ";
+			$ans=<STDIN>;
+			chop $ans;
+			# only default to yes if we get no input
+			$ans = "y" unless ( $ans ne "" );
+			if ( $DEBUG )
+			{
+				print "ans=($ans)\n";
+			}
+		}
+		elsif ( $cleancnt > 0 && $quest == $NO )
+		{
+			print "keep $KEEP_HIST out of $cnt - nuking $sum - no questions\n";
+			$ans="y";
+		}
+		else
+		{
+			undef @cleanthis;
+		}
+		
+	}# end if we have more then we want
+	else
+	{
+			if ( $DEBUG )
+			{
+				print "Nothing to cleanup keeping $KEEP_HIST out of $cnt  \n";	
+				print "	$cnt = $#files_srt_list+1\n";
+				print "	$sum = $cnt - $KEEP_HIST\n" ;
+			}
+	}
+	 
+	# 
+	if ( $ans eq "y" )
+	{
+			# for everything in thre cleanup array
+			foreach $rr ( @cleanthis )
+			{
+				if ( $DEBUG  || $quest == $YES )
+				{
+					print "unlink ($rr);\n";
+				}
+				unlink ($rr);
+				if (-f $rr) { print "File $rr still here \n"; }
+			}
+	}
+
+}
+#########################################
+sub die_help
+{
+		my ($incom)=(@_);
+
+		print "Calling seq: $0 [<editfile>] \n\t one file => editing in place\n";
+		print "             $0 <fromfile> <tofile> \n\t two files ... cope fromfile over tofile - making backup of tofile\n";
+		print "    -k <num> - number of backups to keep default $KEEP_HIST \n";
+		print "    -t <num> - number of days to keep default $KEEP_TIME \n";
+		print "    -b <filename> - make a backup  of <filename> only \n";
+		print "    -o <filename> - like make a backup but prepend orig  \n";
+		print "    -n <filename> - notes on the file\n";
+		print "    -nl <filename> - show me the notes of the file\n";
+		print "    -l <filename>  - show me the backups \n";
+		print "    -lr <filename>  - show me the backups - and point out the most recent \n";
+		print "    -r  - tell me which one is the most recent so I can recover\n";
+		print "    -g  - debug on \n";
+		print "    -s  - questions(aka silent) \n";
+		print "    -x  - no cleanup \n";
+		print "    -V  - VERSION \n";
+		die;
+}
+sub get_commandline
+{
+	my (@ARG_IN)=(@_);
+	my $funcname="get_commandline";
+	my ($ret,$tempfile,$ppath,$ee,%opts);
+
+	my (@myarr, $ff, $gg, @parm , $cnt  );
+
+	if ( $#ARG_IN == 0 && length($ARG_IN[0]) > 0 )
+	{
+		unless ($ARG_IN[0] =~ /--/ ) {die  "($ARG_IN[0])need to terminate with -- "};
+			
+		undef @ARGV;
+		@ARGV=split(/\s+/,$ARG_IN[0]);
+	}
+
+####################
+	
+	@myarr = @ARG_IN;
+        foreach ( $cnt=0; $ff=$ARG_IN[$cnt]; ++$cnt )
+        {
+		# don't have a debug variable yet
+		#print "inarg: $ff ($cnt)\n";
+
+		# if this is a switch
+                if ( $ff =~ /^-/ )
+                {
+			# these flags do not take an argument
+			if ( $ff =~ /g|s|x$/ )
+			{
+				if ( $DEBUG || $ff eq "-g" )
+				{
+					print "info: $ff takes no operator\n";
+				}
+
+			}
+			# else we take the parm(argument) with us
+			else
+			{
+				$cnt++;
+				$gg = $ARG_IN[$cnt];
+			}
+
+			for ( $ff )
+			{
+
+				# turn on debug 
+				if ( /-g/ )
+				{
+					$DEBUG=$YES;
+				}
+#############docit aka notes
+				elsif ( /-n/ )
+				{
+($ret,$gg)=validate_path_file($gg);
+$orig_edit_file=$gg;
+if ( -d $orig_edit_file )
+{
+$orig_edit_file .= "/readme";
+}
+# breakup the incoming file name
+my ($vol,$topath,$edit_file)=File::Spec::Unix->splitpath($orig_edit_file);
+				if ( $DEBUG )
+				{
+print " ($vol,$topath,$edit_file)\n";
+				}
+
+if ( -d $topath )
+{
+my			$backup_path=$BACKUPDIR.$topath;
+my			$bdir=File::Spec::Unix->catpath($BACKUPDRIVE,$backup_path);
+			# if the backup dir is there we're good 
+			if ( -d $bdir )
+			{
+				if ( $DEBUG )
+				{
+					print "$bdir exists\n";
+				}
+			}
+			# else make the directory and die hard if error 
+			else
+			{
+my					$ret = mkpath ($bdir) || die "Can not make $bdir";
+
+					if ( $DEBUG )
+					{
+						print "$ret $bdir made\n";
+					}
+			}
+my		$edt_file=File::Spec::Unix->catpath($vol,$bdir,"$edit_file$DOC_SUF");
+		if ( /-nl/ )
+		{
+			###so orig befor should not match
+my			@thesematch = myglob("$bdir","$edit_file$DOC_SUF");
+			print "Doc file is:@thesematch\n";
+		}
+		else
+{
+if ( ! -f $edt_file)
+{
+	open (QCK,">$edt_file")or die "Could not open $edt_file";
+	print QCK "Filename: $orig_edit_file\n";
+	close QCK;
+}
+		system ( "$EDITPROG \"$edt_file\" ");
+		print "Doc file: $edt_file\n";
+}
+		exit 0;
+}
+else
+{
+	print "not if ( -d $topath )\n";
+}
+				}
+				elsif ( /-b/ || /-o/ )
+				{
+					if ( /-o/ )
+					{
+						$ORIG=$YES;
+						$BACKUPONLY=$YES;
+					}
+					else
+					{
+						$BACKUPONLY=$YES;
+					}
+					$orig_edit_file=$gg;
+					($ret,$gg)=validate_path_file($gg);
+					push ( @parm,$gg );
+					if ( $ret == $bad  )
+					{
+						die "Error on parm $gg";
+					}
+
+				}
+				elsif ( /-l/  )
+				{
+					if ( /-lr/ )
+					{
+						$RECOVERWHICH=$YES;
+					}
+					$LISTONLY=$YES;
+					$orig_edit_file=$gg;
+					($ret,$gg)=validate_path_file($gg);
+					push ( @parm,$gg );
+					if ( $ret == $bad  )
+					{
+						die "Error on parm $gg";
+					}
+
+				}
+				elsif ( /-s/ )
+				{
+					$QUES=$NO;
+				}
+				elsif ( /-x/ )
+				{
+					$CLEANUP=$gg;
+					$CLEANUP=$NO;
+				}
+				elsif ( /-V/ )
+				{
+					die "VERSION = $VERSION\n";
+				}
+				elsif ( /-k/ )
+				{
+					$KEEP_HIST=$gg;
+				}
+				elsif ( /-t/ )
+				{
+					$KEEP_TIME=$gg;
+					if ( $DEBUG)
+					{
+						print "keep time in days = $KEEP_TIME\n";
+					}
+				}
+				else
+				{
+					#default;
+				}
+
+			}
+                }
+		# else it must be a filename
+                else
+                {
+
+			($ret,$ff)=validate_path_file($ff);
+			if ( $ret == $bad  )
+			{
+				die "Error on parm $ff";
+			}
+			else
+			{
+				if ( $DEBUG)
+				{
+					print  "Good on parm $ff\n";
+				}
+			}
+			push ( @parm,$ff );
+
+                }
+
+	}
+	if ($#parm == 0 )
+	{
+		$orig_edit_file=pop(@parm);
+	}
+	elsif ($#parm == 1 )
+	{
+			# have to reverse this cause I pushed em in lifo
+			$orig_to_file = pop(@parm);
+			$orig_from_file = pop(@parm);
+			$FROMTO=$YES;
+	}
+	else
+	{
+		die_help "I don't get the $#parm switchless parameters\n";
+	}
+
+	if ( $DEBUG == $YES )
+	{
+		print "LISTONLY=$LISTONLY BACKUPPNLY=$BACKUPONLY ORIG=$ORIG FROMTO=$FROMTO orig_from_file =$orig_from_file; orig_to_file =$orig_to_file; orig_edit_file=$orig_edit_file\n";
+	}
+
+return;
+}
+
+
+#########################
+# MAIN STARTS HERE 
+#########################
+my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst);
+my @thesematch;
+my ($vol,$topath,$edit_file);
+my ($timet, $rr,$edt_file, $t_file,
+		$ret,
+		$ans,
+	$backup_path,
+	$patt_cleanupfile,
+	$bdir,
+	$checkdir,
+		@listit, $tt,
+	$bck_file,
+	);
+
+	push ( @ARGV,"--") ;
+	get_commandline ( @ARGV) ;
+
+	# get a time stamp 
+	($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst)=localtime(time);
+	$mon++;
+	my $sccsid="=$mon$mday$hour$min$sec";
+
+	die "Can not see BACKUPDIR $BACKUPDIR \n" unless ( -e $BACKUPDIR ) ;
+
+	# if we are editing in place 
+	# this will be unassigned wif we are not editing in place - that's why I
+	# turned off warnings
+	#if ( -f	$orig_edit_file )
+	if ( $FROMTO == $NO )
+	{
+		die "Can not see an executable for editing $EDITPROG \n" unless ( -e $EDITPROG ) ;
+		# breakup the incoming file name
+		($vol,$topath,$edit_file)=File::Spec::Unix->splitpath($orig_edit_file);
+
+
+		if ( $DEBUG )
+		{
+			print "infile=>($vol,$topath,$edit_file)\n";
+		}
+
+		$edt_file=File::Spec::Unix->catpath($vol,$topath,"$edit_file$BACKLOCK_SUF");
+
+		if ( $DEBUG )
+		{
+			print "edt_file=$edt_file\n";
+		}
+		# if we have a temp editfile but it exists already
+		if ( -f $edt_file )
+		{
+			# if there is no diff then just nuke it 
+			if ( compare($edt_file,$orig_edit_file) == 0 )
+			{
+				if ( $DEBUG )
+				{
+					print "unlinking previous temp edit file $edt_file\n";
+				}
+				
+				if ( unlink ($edt_file) == 0 ) 
+				{
+					die "Error on unlink ($edt_file) previous edit file  \n";
+				}
+				unless ( ! -f $edt_file) 
+				{
+					die "did not cleanup $edt_file\n";
+				}
+			}
+			else
+			{
+					$t_file=File::Spec::Unix->catpath($vol,$DUPDIR,"$edit_file${$}");
+					if ( rename ($edt_file,$t_file) ==1 )
+					{
+						print " found old edit file $edt_file renamed to $t_file\n";
+					}
+					else
+					{
+						die " found old edit file $edt_file  could not rename\n";
+
+					}
+
+			}
+		}
+
+
+		if ( ! $LISTONLY)
+		{
+			# see if we can make the file
+			open ( OUT,">$edt_file") or die "can not open temp edit file $edt_file";
+			close OUT;
+
+			if ( -w $edt_file )
+			{
+
+				$ret = copy ($orig_edit_file,$edt_file );
+				if ( $ret == 0  ) { print "Copy ($orig_edit_file,$edt_file ) failed $! \n"; }
+				if ( $DEBUG )
+				{
+					print "$orig_edit_file copy ret= $ret\n";
+				}
+			}
+			else
+			{
+					die "can not make temp file $edt_file\n";
+			}
+		}
+		if ( (! $BACKUPONLY) && (! $LISTONLY) )
+		{
+			system ( "$EDITPROG \"$edt_file\" ");
+		}
+	}
+	else
+	{
+		#we have been given an already edited (from) file 
+		$edt_file=$orig_from_file;
+		$orig_edit_file =$orig_to_file;
+		($vol,$topath,$edit_file)=File::Spec::Unix->splitpath($orig_edit_file);
+	}
+
+	# if no changes have been made we can just end
+	# and we had only one file to start with
+	if (
+             ( ! $LISTONLY) && ( ! $BACKUPONLY ) &&
+                ( compare($edt_file,$orig_edit_file) == 0  ) && ( $FROMTO==$NO ) )
+					
+	{
+			print "No diff\n";
+
+			if ( $DEBUG )
+			{
+				print "should unlink $edt_file\n";
+			}
+			
+			if ( unlink ($edt_file) == 0 ) 
+			{
+				die "Error on unlink ($edt_file) previous edit file  \n";
+			}
+	}
+	else  
+	{
+		if (  $BACKUPONLY  )
+		{
+			if ( $DEBUG )
+			{
+				print "backup requested <$orig_edit_file>\n";
+			}
+			
+
+		}
+		elsif (  $LISTONLY  )
+		{
+			$backup_path=$BACKUPDIR.$topath;
+			$bdir=File::Spec::Unix->catpath($BACKUPDRIVE,$backup_path);
+			print "list requested <$orig_edit_file>\n";
+			$patt_cleanupfile=File::Spec::Unix->catpath($bdir,"$edit_file");
+			@thesematch = myglob("$bdir","$edit_file");
+			if ( $#thesematch < 0 )
+			{
+				print "No backups found for in $bdir for file $edit_file\n";
+			}
+			
+			if ( $DEBUG )
+			{
+				print "time shown in time difference between now - this scripts running and when the file was made\n";
+
+			}
+my ($bnam, $syscmd,$dnam,$myl);
+			$dnam =  dirname( $thesematch[0] );
+			print "In $dnam\n";
+			$syscmd="cd $dnam; ls -atld ";
+			foreach ($rr=0; $rr <= $#thesematch ; $rr++ )
+			{
+				$bnam =  basename( $thesematch[$rr] );
+				$syscmd=$syscmd." $bnam";
+			}
+			$rr=1;
+			open ( SY, " $syscmd | " );
+			while ( $myl = <SY> )
+			{
+				print "$rr:$myl";
+				$rr++;
+			}
+			close SY;
+
+			# if we are interested in only the most recent one
+			if ( $RECOVERWHICH == $YES )
+			{
+				$rr=0;
+
+				if ( $DEBUG )
+				{
+				system ("set -x; diff $thesematch[$rr] $orig_edit_file \n");
+				}
+				print "\nHere is the command:\n\ncp $thesematch[$rr] $orig_edit_file \n\n";
+			}
+
+
+			# no need to chuck error - so exit not die
+			exit(0);
+		}
+		elsif ( $FROMTO==$YES  )
+		{
+			print "from to copy ($edt_file,$orig_edit_file) \n";
+
+		}
+		else
+		{
+			print "changes have been made \n";
+		}
+
+		#	$ret = copy ($orig_edit_file,$edt_file );
+
+		$checkdir=File::Spec::Unix->catpath($BACKUPDRIVE,$BACKUPDIR);
+		if ( ! -d $checkdir )
+		{
+			die "Could not see the top level $checkdir .. leaving $edt_file\n";
+		}
+
+		if ( $QUES==$YES  && $BACKUPONLY==$NO && $FROMTO == $NO  )
+		{
+			print "Commit changes ? [y]/n/m \n";
+			print "n: remove temp file (backout changes)\n";
+			print "m: leave temp file but no copy over\n";
+			print "s: DO IT\n";
+
+			$ans=<STDIN>;
+			chomp $ans;
+		}
+		else
+		{
+			$ans="y";
+		}
+
+
+		if ( $ans ne "m" && $ans ne "n"  )
+		{
+			$backup_path=$BACKUPDIR.$topath;
+			$bdir=File::Spec::Unix->catpath($BACKUPDRIVE,$backup_path);
+
+
+			if ( "$ORIG" eq "$YES" )
+			{
+				$bck_file=File::Spec::Unix->catpath($BACKUPDRIVE,$backup_path,"orig.$edit_file");
+			}
+			else
+			{
+				$bck_file=File::Spec::Unix->catpath($BACKUPDRIVE,$backup_path,"$edit_file.$sccsid");
+				
+				# make sire it is uniq
+				if ( -f $bck_file )
+				{
+					my $uniq=0;
+					while ( -f $bck_file )
+					{
+					$bck_file=File::Spec::Unix->catpath($BACKUPDRIVE,$backup_path,"$edit_file.$sccsid".$uniq++);
+					}
+				}
+
+			}
+
+
+			if ( $DEBUG )
+			{
+				print "backup_path=$backup_path bdir=$bdir bck_file=$bck_file\n";
+			}
+
+			# if the backup dir is there we're good 
+			if ( -d $bdir )
+			{
+				if ( $DEBUG )
+				{
+					print "$bdir exists\n";
+				}
+			}
+			# else make the directory and die hard if error 
+			else
+			{
+					$ret = mkpath ($bdir) || die "Can not make $bdir";
+
+					if ( $DEBUG )
+					{
+						print "$ret $bdir made\n";
+					}
+			}
+
+			# make a backup of the original - if it actually exists already
+			if ( -f $orig_edit_file )
+			{
+
+				$ret = copy ($orig_edit_file,$bck_file );
+				if ( $ret == 0  )
+				{
+					print "Copy ($orig_edit_file,$bck_file ) failed $! \n"; 
+				}
+				system("touch -r $orig_edit_file $bck_file 1>/tmp/a_touch${$} 2>/tmp/a_touch${$}.err " );
+## Can be done in perl ############
+## Can be done in perl  use File:: -ef | grep nmonouch;
+## Can be done in perl  $touch_obj = File::Touch->new(
+## Can be done in perl                                reference => $orig_edit_file,
+## Can be done in perl                                no_create => 1
+## Can be done in perl                                );
+## Can be done in perl  $ret = $touch_obj->touch( $bck_file );
+## Can be done in perl if ( $ret == 0  )
+## Can be done in perl {
+## Can be done in perl 	print "touch ($orig_edit_file,$bck_file ) failed $! \n"; 
+## Can be done in perl }
+## Can be done in perl ######################
+			}
+
+			if ( $DEBUG )
+			{
+				print "backup of the original=>$ret = copy ($orig_edit_file,$bck_file );\n";
+			}
+			###  skip if we only making backup
+			if ( $BACKUPONLY != $YES )
+			{
+				$ret = copy ($edt_file,$orig_edit_file);
+				if ( $ret == 0  ) { print "Copy ($edt_file,$orig_edit_file) failed $! \n"; }
+				if ( $DEBUG )
+				{
+					print "edit over original $ret = copy ($edt_file,$orig_edit_file)\n";
+				}
+			}
+			# if this is not a from to senario 
+			if ( $FROMTO == $NO )
+			{
+				$ret = unlink ($edt_file );
+				if ( $ret < 1 ) { print "Unlink $edt_file failed $! \n"; }
+				if ( $DEBUG )
+				{
+					print " $ret = unlink ($edt_file )\n";
+				}
+			}
+			if ( $DEBUG )
+			{
+				print "Changes commited\n";
+			}
+			if ( $CLEANUP == $YES )
+			{
+				$patt_cleanupfile=File::Spec::Unix->catpath($bdir,"$edit_file");
+
+#				@thesematch = myglob("$bdir","$edit_file");
+				@thesematch = myglob_b("$bdir","$edit_file");
+
+				cleanup_old_backups ($QUES, @thesematch );
+			}
+		}
+		else
+		{
+			if ( $ans eq "n" )
+			{
+				print "nothing commited temp edits removed\n";
+				$ret = unlink ($edt_file );
+				if ( $ret < 1 ) { print "Unlink $edt_file failed $! \n"; }
+				if ( $DEBUG )
+				{
+					print " $ret = unlink ($edt_file )\n";
+				}
+			}
+			else
+			{
+				print "leaving file $edt_file\n";
+			}
+		}
+}
+#########################################
